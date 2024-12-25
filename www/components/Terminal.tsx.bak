@@ -1,0 +1,210 @@
+"use client";
+
+import React, { useState, useRef, useEffect } from 'react';
+import { Terminal as XTerm } from 'xterm';
+import { FitAddon } from 'xterm-addon-fit';
+import { WebLinksAddon } from 'xterm-addon-web-links';
+import { SearchAddon } from 'xterm-addon-search';
+import { Terminal as TerminalIcon, Maximize2, Minimize2 } from 'lucide-react';
+
+const BASE_URL = 'http://localhost:3001';
+
+const Terminal = ({ initialMessage = "Welcome to the Terminal\r\n" }) => {
+  const [sessionId, setSessionId] = useState(null);
+  const [isConnected, setIsConnected] = useState(false);
+  const [isFullscreen, setIsFullscreen] = useState(false);
+  const [inputBuffer, setInputBuffer] = useState('');
+  const [error, setError] = useState('');
+  
+  const terminalRef = useRef(null);
+  const xtermRef = useRef(null);
+  const wsRef = useRef(null);
+  const fitAddonRef = useRef(null);
+  
+  useEffect(() => {
+    initializeTerminal();
+    return () => cleanup();
+  }, []);
+
+  const initializeTerminal = async () => {
+    try {
+      // Initialize xterm.js
+      const term = new XTerm({
+        fontFamily: 'Menlo, Monaco, "Courier New", monospace',
+        fontSize: 14,
+        lineHeight: 1.2,
+        cursorBlink: true,
+        theme: {
+          background: '#1a1a1a',
+          foreground: '#00ff00',
+          cursor: '#00ff00'
+        }
+      });
+      
+      // Add addons
+      const fitAddon = new FitAddon();
+      const webLinksAddon = new WebLinksAddon();
+      const searchAddon = new SearchAddon();
+      
+      term.loadAddon(fitAddon);
+      term.loadAddon(webLinksAddon);
+      term.loadAddon(searchAddon);
+      
+      // Store refs
+      xtermRef.current = term;
+      fitAddonRef.current = fitAddon;
+      
+      // Mount terminal
+      if (terminalRef.current) {
+        term.open(terminalRef.current);
+        fitAddon.fit();
+        term.write(initialMessage);
+        
+        // Create session and connect
+        await createSession();
+      }
+    } catch (err) {
+      setError('Failed to initialize terminal');
+      console.error('Terminal initialization error:', err);
+    }
+  };
+
+  const createSession = async () => {
+    try {
+      const { cols, rows } = xtermRef.current;
+      const response = await fetch(`${BASE_URL}/api/sessions`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cols, rows })
+      });
+      
+      if (!response.ok) throw new Error('Failed to create session');
+      
+      const data = await response.json();
+      setSessionId(data.sessionId);
+      connectWebSocket(data.sessionId);
+    } catch (err) {
+      setError('Failed to create terminal session');
+      console.error('Session creation error:', err);
+    }
+  };
+
+  const connectWebSocket = (id) => {
+    const ws = new WebSocket(`ws://localhost:3001/ws?sessionId=${id}`);
+    
+    ws.onopen = () => {
+      setIsConnected(true);
+      xtermRef.current.write('\r\nConnected to session\r\n');
+    };
+
+    ws.onmessage = (event) => {
+      if (event.data instanceof Blob) {
+        const reader = new FileReader();
+        reader.onload = () => {
+          const text = new TextDecoder().decode(reader.result);
+          xtermRef.current.write(text);
+        };
+        reader.readAsArrayBuffer(event.data);
+      } else {
+        xtermRef.current.write(event.data);
+      }
+    };
+
+    ws.onerror = () => {
+      setError('WebSocket connection error');
+      setIsConnected(false);
+    };
+
+    ws.onclose = () => {
+      setIsConnected(false);
+      xtermRef.current.write('\r\nDisconnected from session\r\n');
+    };
+
+    wsRef.current = ws;
+
+    // Handle terminal input
+
+// Modify the terminal input handler
+xtermRef.current.onData(data => {
+  if (ws.readyState === WebSocket.OPEN) {
+    if (data === '\r') { // Enter key
+      ws.send(inputBuffer + '\n');
+      setInputBuffer('');
+    } else {
+      setInputBuffer(prev => prev + data);
+      xtermRef.current.write(data); // Echo input locally
+    }
+  }
+});
+  };
+
+  const handleResize = async () => {
+    if (!sessionId || !xtermRef.current) return;
+    
+    fitAddonRef.current.fit();
+    const { cols, rows } = xtermRef.current;
+    
+    try {
+      await fetch(`${BASE_URL}/api/sessions/${sessionId}/resize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cols, rows })
+      });
+    } catch (err) {
+      console.error('Resize error:', err);
+    }
+  };
+
+  useEffect(() => {
+    window.addEventListener('resize', handleResize);
+    return () => window.removeEventListener('resize', handleResize);
+  }, [sessionId]);
+
+  const toggleFullscreen = () => {
+    setIsFullscreen(!isFullscreen);
+    setTimeout(() => handleResize(), 100);
+  };
+
+  const cleanup = () => {
+    if (wsRef.current) {
+      wsRef.current.close();
+    }
+    if (xtermRef.current) {
+      xtermRef.current.dispose();
+    }
+  };
+
+  return (
+    <div className={`relative ${isFullscreen ? 'fixed inset-0 z-50' : 'h-full'}`}>
+      <div className="flex items-center justify-between bg-gray-800 p-2">
+        <div className="flex items-center space-x-2">
+          <TerminalIcon className="w-5 h-5 text-green-400" />
+          <span className="text-green-400">Terminal {sessionId ? `(${sessionId})` : ''}</span>
+        </div>
+        <button
+          onClick={toggleFullscreen}
+          className="p-1 hover:bg-gray-700 rounded"
+        >
+          {isFullscreen ? (
+            <Minimize2 className="w-5 h-5 text-green-400" />
+          ) : (
+            <Maximize2 className="w-5 h-5 text-green-400" />
+          )}
+        </button>
+      </div>
+      
+      <div 
+        ref={terminalRef}
+        className="h-full bg-gray-900"
+      />
+      
+      {error && (
+        <div className="absolute bottom-4 right-4 bg-red-500 text-white px-4 py-2 rounded">
+          {error}
+        </div>
+      )}
+    </div>
+  );
+};
+
+export default Terminal;
