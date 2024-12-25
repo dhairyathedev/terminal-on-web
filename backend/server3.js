@@ -12,6 +12,31 @@ const wss = new WebSocket.Server({ server });
 const docker = new Docker();
 const activeSessions = new Map();
 
+process.on('SIGTERM', async () => {
+    console.log('Received SIGTERM. Cleaning up containers...');
+    await cleanupAllSessions();
+    process.exit(0);
+});
+
+process.on('SIGINT', async () => {
+    console.log('Received SIGINT. Cleaning up containers...');
+    await cleanupAllSessions();
+    process.exit(0);
+});
+
+async function cleanupAllSessions() {
+    const cleanupPromises = Array.from(activeSessions.keys()).map(sessionId => 
+        cleanupSession(sessionId)
+    );
+    
+    try {
+        await Promise.all(cleanupPromises);
+        console.log('All sessions cleaned up successfully');
+    } catch (error) {
+        console.error('Error during cleanup:', error);
+    }
+}
+
 app.use(cors());
 app.use(express.json());
 
